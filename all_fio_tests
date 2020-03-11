@@ -1,0 +1,47 @@
+#!/bin/bash
+
+out() {
+
+	echo "$(date): $*"
+}
+
+myfio() {
+
+	file="$1"
+	blocksize="$2"
+	mode="$3"
+
+	# wait a short time before starting a test, maybe there's io to be done
+	sleep 10
+
+	fio 	--filename=$file 	\
+		--sync=1 		\
+		--rw="$mode"  		\
+		--bs=$blocksize		\
+		--numjobs=1 		\
+		--iodepth=4 		\
+		--group_reporting 	\
+		--name=test 		\
+		--filesize=10G 		\
+		--runtime=300 		\
+		--output-format=json	\
+		&& rm $file
+}
+
+random_read()  { myfio "$1" "$2" "randread"  ; }
+random_write() { myfio "$1" "$2" "randwrite" ; }
+seq_read()     { myfio "$1" "$2" "read"      ; }
+seq_write()    { myfio "$1" "$2" "write"     ; }
+
+directory="$1"
+comment="$2"
+
+for run in 1 2 3 4 5 
+	do
+	for blocksize in 4k 64k 1M ; do
+		for mytest in random_read random_write seq_read seq_write;do
+			out "$(printf "device %20s run %2d blocksize %3s test: %10s\n" "$comment" "$run" "$blocksize" "$mytest")"
+		 	$mytest "$directory/test" "$blocksize" >${comment}.bs_$blocksize.${mytest}.run_${run}.json
+		done
+	done
+done

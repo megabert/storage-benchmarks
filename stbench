@@ -1,0 +1,266 @@
+#!/bin/bash
+
+PATH="/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin"
+fio="/root/test/bin/all_fio_tests"
+raid_dev_name="/dev/md/myraid"
+vg_name="myvg"
+lv_name="mylv"
+zfs_pool_name="mypool"
+
+export fio raid_dev_name PATH zfs_pool_name lv_name vg_name
+
+out() {
+
+	echo "$(date): $*"
+
+}
+
+create_raid() {
+
+	local raid_dev_name="$1"
+	local modename="$2"
+	local raid_level=""
+	shift 2
+
+	case "$modename" in 
+		raid5) raid_level=5
+			;;
+		raid10) raid_level=10
+			;;
+	esac
+	out "creating $modename array out of disks: $*"
+	mdadm --create "$raid_dev_name" --run --level=$raid_level --raid-devices=$# "$@"
+	wait_for_raid_sync "$raid_dev_name"
+	out "raid array synchronization finished"
+
+}
+
+wipe_fs() { 
+
+	for dev in "$@" ; do 
+
+		#out "wiping device $dev"
+		# delete first MB and last MB of device to wipe zfs member signature
+
+		#bytes=$(smartctl -i $dev| awk '/Capacity/{gsub(/,/,"",$3);print $3}')
+		bytes=$(blockdev --getsize64 $dev)
+		mbytes=$(echo "$bytes/1024/1024" | bc)
+		dd if=/dev/zero bs=1M seek=$(($mbytes-1)) count=1 of=$dev
+		dd if=/dev/zero bs=1M count=1 of=$dev
+
+		wipefs -f -q -a "$dev" 
+		/usr/sbin/partprobe "$dev"
+	done
+}
+
+make_zfs() {
+
+	local poolname="$1"
+
+	local vdev_config="$2"
+
+	# examples
+	#
+	# single disk
+	# vdev_config="/dev/data01"
+	#
+	# raid1
+	# vdev_config="mirror /dev/data01 /dev/data02"
+	#
+	# raid10
+	# vdev_config="mirror /dev/data01 /dev/data02 mirror /dev/data03 /dev/data04"
+	#
+	# raidz
+	# vdev_config="raidz /dev/data01 /dev/data02 /dev/data03 /dev/data04"
+
+	local options="$3"
+	local opt_str=""
+
+	[ -n "$options" ] && opt_str="-o"
+
+	out "creating zpool $poolname $opt_str $options $vdev_config"
+	zpool create "$poolname" $opt_str $options $vdev_config
+
+}
+
+make_filesystem() {
+
+	local dev="$1"
+	local fs="$2"
+
+	out "wiping filesystem of $dev"
+	wipe_fs "$dev"
+
+	out "creating filesystem $fs on $dev"
+	case $fs in 
+		zfs)
+			# sector size of all devices is 512 here
+			zpool create mypool -o ashift=9 "$dev"
+			;;
+		btrfs)
+			mkfs -t btrfs "$dev"
+			;;
+		ext3)
+			mkfs -t ext3 "$dev"
+			;;
+		ext4)
+			mkfs -t ext4 "$dev"
+			;;
+	esac
+	out "filesystem creation finished"
+
+}
+
+create_lvm() {
+	local vgname="$1"
+	local lvname="$2"
+	local pvname="$3"
+
+	out "creating lvm config for vg $vgname pv $pvname lv $lvname"
+	# partitioning not needed when using the full disk
+	pvcreate -f "$pvname"
+	vgcreate "$vgname" "$pvname"
+	vgsize="$(vgdisplay "$vgname"| awk '/Free  PE/{print $5}')"
+	lvcreate -n "$lvname" -l "$vgsize" "$vgname"
+	out "lvm creation finished"
+}
+
+destroy_lvm() {
+	local vgname="$1"
+	out "destroying lvm vg $vgname"
+	vgchange -an "$vgname"
+	vgremove -f "$vgname"
+}
+
+mount_filesystem() {
+		
+
+	local dev="$1"
+	local mountpoint="$2"
+	mount "$dev" "$mountpoint"
+
+}
+
+run_multi_fs_test() {
+
+	local tempmount="$(mktemp -d)"
+	local comment="$1"
+	local device="$2"
+	shift 2
+
+	diskname="$(basename $device)"
+
+	for fs in "$@"; do
+		make_filesystem "$device" "$fs"
+		mount "$device" "$tempmount"
+		$fio "$tempmount" "${comment}.$fs"
+		umount "$tempmount" 
+	done
+}
+
+wait_for_raid_sync() {
+
+	local raid_dev="$1"
+
+	# in debugging phase no wait for the raid sync to finish
+	# return 0
+
+	while :;do
+		if mdadm --detail "$raid_dev" | grep -qE "^[[:space:]]+State[[:space:]]+:[[:space:]]+clean[[:space:]]*$"; then
+			return 0
+		fi
+		sleep 30
+	done
+}
+
+pause() {
+
+	echo -e "\nPress ENTER to continue\n\n"
+	read nix
+}
+
+
+run_all_tests() {
+
+	# cleanup
+	rm -rf /tmp/tmp*
+
+	# run tests on single disk with direct filesystems
+	run_multi_fs_test "singledisk" /dev/data01 ext3 ext4 btrfs
+
+	# run tests on single disk with filesystem on top of lvm
+	create_lvm "$vg_name" "$lv_name" "/dev/data01"
+	run_multi_fs_test "singledisk.lvm" "/dev/mapper/${vg_name}-${lv_name}" ext3 ext4 btrfs
+	destroy_lvm "$vg_name"
+
+	# run tests on raid10 with direct filesystems
+	create_raid "$raid_dev_name" raid10 "/dev/data01" "/dev/data02" "/dev/data03" "/dev/data04" 
+	run_multi_fs_test "raid10" "$raid_dev_name"  ext3 ext4 btrfs
+
+	# run tests on raid10 with filesystem on top of lvm
+	create_lvm "$vg_name" "$lv_name" "$raid_dev_name"
+	run_multi_fs_test "raid10.lvm" "/dev/mapper/${vg_name}-${lv_name}" ext3 ext4 btrfs
+	destroy_lvm "$vg_name"
+
+	# destroy raid10
+	mdadm --stop "$raid_dev_name"
+	mdadm --zero-superblock "/dev/data01"
+	mdadm --zero-superblock "/dev/data02"
+	mdadm --zero-superblock "/dev/data03"
+	mdadm --zero-superblock "/dev/data04"
+
+	# run tests on raid5 with direct filesystems
+	create_raid "$raid_dev_name" raid5 "/dev/data01" "/dev/data02" "/dev/data03" "/dev/data04" 
+	run_multi_fs_test "raid5" "$raid_dev_name"  ext3 ext4 btrfs
+
+	# run tests on raid5 with filesystem on top of lvm
+	create_lvm "$vg_name" "$lv_name" "$raid_dev_name"
+	run_multi_fs_test "raid5.lvm" "/dev/mapper/${vg_name}-${lv_name}" ext3 ext4 btrfs
+	destroy_lvm "$vg_name"
+
+	# destroy raid5
+	mdadm --stop "$raid_dev_name"
+	mdadm --zero-superblock "/dev/data01"
+	mdadm --zero-superblock "/dev/data02"
+	mdadm --zero-superblock "/dev/data03"
+	mdadm --zero-superblock "/dev/data04"
+
+	# run tests on zfs/single disk
+	make_zfs "$zfs_pool_name" "/dev/data01"
+	$fio "/$zfs_pool_name" "singledisk.zfs"
+	zpool destroy "$zfs_pool_name" 
+
+	# run tests on zfs/single disk-compressed
+	make_zfs "$zfs_pool_name" "/dev/data01"
+	zfs set compression=lz4 "$zfs_pool_name"
+	$fio "/$zfs_pool_name" "singledisk.compressed.zfs"
+	zpool destroy "$zfs_pool_name" 
+
+	# run tests on zfs/raidz
+	make_zfs "$zfs_pool_name" "raidz /dev/data01 /dev/data02 /dev/data03 /dev/data04" "ashift=9"
+	$fio "/$zfs_pool_name" "raidz.zfs"
+	zpool destroy "$zfs_pool_name" 
+
+	# run tests on zfs/raidz-compressed
+	make_zfs "$zfs_pool_name" "raidz /dev/data01 /dev/data02 /dev/data03 /dev/data04" "ashift=9"
+	zfs set compression=lz4 "$zfs_pool_name"
+	$fio "/$zfs_pool_name" "raidz.compressed.zfs"
+	zpool destroy "$zfs_pool_name" 
+
+	# run tests on zfs/raid10
+	make_zfs "$zfs_pool_name" "mirror /dev/data01 /dev/data02 mirror /dev/data03 /dev/data04" "ashift=9"
+	$fio "/$zfs_pool_name" "raid10.zfs"
+	zpool destroy "$zfs_pool_name" 
+
+	# run tests on zfs/raid10-compressed
+	make_zfs "$zfs_pool_name" "mirror /dev/data01 /dev/data02 mirror /dev/data03 /dev/data04" "ashift=9"
+	zfs set compression=lz4 "$zfs_pool_name"
+	$fio "/$zfs_pool_name" "raid10.compressed.zfs"
+	zpool destroy "$zfs_pool_name" 
+}
+
+{ 
+
+	run_all_tests 
+
+}  #3>&1 >full.log 2>&1

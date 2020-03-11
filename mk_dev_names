@@ -1,0 +1,27 @@
+#!/bin/bash
+
+#
+# Storage device names may change on every system boot.
+# That's very bad if you gonna overwrite storage devices
+# all the time and do not want to get the wrong device 
+# to be overwritten.
+#
+# create persistent storage device names by ...
+#    ... checking the serial numbers and 
+#    ... copying the device files to unique persistent names within /dev
+#
+
+rm -f /dev/data01 /dev/data02 /dev/data03 /dev/data04 /dev/osdisk /dev/cache01
+
+while read name vendor model size serial;do
+
+	[ $serial == "b057ac7800d00000"    ] && cp -axuv /dev/$name /dev/data01
+	[ $serial == "b057e80a00d00000"    ] && cp -axuv /dev/$name /dev/data02
+	[ $serial == "b0676c7300d00000"    ] && cp -axuv /dev/$name /dev/data03
+	[ $serial == "b067b48500d00000"    ] && cp -axuv /dev/$name /dev/data04
+	[ $serial == "LNEL124400CX120CGN"  ] && cp -axuv /dev/$name /dev/osdisk
+	[ $serial == "S33CNX0J903334R"     ] && cp -axuv /dev/$name /dev/cache01
+
+done < <(lsblk -J -o NAME,SIZE,TYPE,SERIAL,MODEL,VENDOR | jq -r '.blockdevices[] | .name +" "+ .vendor +" "+ .model +" "+ .size +" "+ .serial')
+
+
