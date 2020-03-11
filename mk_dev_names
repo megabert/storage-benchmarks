@@ -22,6 +22,7 @@ while read name vendor model size serial;do
 	[ $serial == "LNEL124400CX120CGN"  ] && cp -axuv /dev/$name /dev/osdisk
 	[ $serial == "S33CNX0J903334R"     ] && cp -axuv /dev/$name /dev/cache01
 
-done < <(lsblk -J -o NAME,SIZE,TYPE,SERIAL,MODEL,VENDOR | jq -r '.blockdevices[] | .name +" "+ .vendor +" "+ .model +" "+ .size +" "+ .serial')
+done < <(lsblk -J -o NAME,SIZE,TYPE,SERIAL,MODEL,VENDOR \
+	  | jq -r '.blockdevices[] | .name +" "+ .vendor +" "+ .model +" "+ .size +" "+ .serial')
 
 
