@@ -1,12 +1,14 @@
 # Storage Benchmarks
 
+## WARNING! WARNING! WARNING!
+
+All is work in progress. Consider this scripts as **very dangerously** because filesystems are 
+created, destroyed, wiped and overwritten a lot. No one would run them on a computer, with data on it, which are important for you.
+
 ## General
 
 These are some scripts to automate storage benchmarks with the intention to get performance data
 for storage to be used for full virtualization with kvm.
-
-All is work in progress. Consider it dangerously because filesystems and storage devices are 
-wiped and overwritten a lot.
 
 ## Scripts function
 
